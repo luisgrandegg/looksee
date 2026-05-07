@@ -1,0 +1,55 @@
+name: E2E (Action against example/)
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  green:
+    name: Green — no visual change, expects pass
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Use the action from the current commit. Re-running locally would use
+      # the published @v0/@v1 ref; in CI we point at the workspace itself
+      # so PRs test against their own changes.
+      - name: Run looksee against example/
+        uses: ./
+        with:
+          working-directory: example
+          comment-on-pr: 'false' # don't spam PRs from the e2e job
+
+  red:
+    name: Red — inject visual change at runtime, expects fail
+    runs-on: ubuntu-latest
+    # The whole job is expected to fail. We invert the result with continue-on-error
+    # plus an explicit assertion step.
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Inject deterministic visual change into a story
+        # NEVER commit this change. Constitution principle 9: keep determinism real.
+        # The example's Button story renders text 'Click me' — change it to 'CLICK!!!'.
+        run: |
+          set -euxo pipefail
+          sed -i "s/Click me/CLICK!!!/g" example/src/Button.tsx
+          git diff --stat example/src/Button.tsx
+
+      - name: Run looksee against modified example/ (expected to fail)
+        id: action
+        continue-on-error: true
+        uses: ./
+        with:
+          working-directory: example
+          comment-on-pr: 'false'
+
+      - name: Assert action failed as expected
+        run: |
+          if [ "${{ steps.action.outcome }}" = "failure" ]; then
+            echo "✅ Expected: lost-pixel detected the injected regression."
+            exit 0
+          fi
+          echo "❌ Expected the action to fail on the injected change, but it did not."
+          exit 1

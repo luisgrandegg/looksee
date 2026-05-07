@@ -1,0 +1,19 @@
+# This is the file the CLI's `init` command writes into a consumer repo,
+# with `<action-version>` already filled in. Kept here so the example
+# consumer is exercised end-to-end by `e2e.yml` (which uses `uses: ./` to
+# substitute the in-tree Action for the published one).
+name: Visual Regression
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  visual:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: luisgrandegg/looksee@v0
