@@ -122,23 +122,32 @@ jobs:
             exit 1
           fi
 
-      - name: Inject deterministic visual change (button background colour)
-        # Change the primary button's background from blue (#2563eb) to red (#dc2626).
-        # This affects every story rendered by Button.tsx with variant=primary,
-        # producing a large-area pixel diff that any reasonable threshold catches.
+      - name: Inject MAXIMAL visual change (replace Button with full-viewport red rectangle)
+        # Most aggressive plausible change: a giant red rectangle that fills
+        # the canvas in every story. If THIS doesn't produce screenshot diffs,
+        # something is wrong with the rebuild or screenshotting itself.
         run: |
           set -euxo pipefail
-          sed -i "s/#2563eb/#dc2626/g" example/src/Button.tsx
-          if git diff --quiet example/src/Button.tsx; then
-            echo "❌ sed did not change anything — the e2e test cannot detect a regression."
-            exit 1
-          fi
-          echo "✅ Button.tsx modified:"
+          cat > example/src/Button.tsx <<'EOF'
+          import type { ReactNode } from 'react';
+          export interface ButtonProps {
+            children?: ReactNode;
+            variant?: 'primary' | 'secondary';
+            disabled?: boolean;
+            onClick?: () => void;
+          }
+          export function Button(_props: ButtonProps): JSX.Element {
+            return (
+              <div style={{ width: 800, height: 400, background: '#ff0000', color: '#ffffff', fontSize: 96, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                INJECTED
+              </div>
+            );
+          }
+          EOF
+          echo "✅ Button.tsx replaced. Diff:"
           git diff example/src/Button.tsx
 
       - name: Force-clean Storybook + Vite caches and rebuild
-        # Remove storybook-static AND the Vite/Storybook caches so the rebuild
-        # cannot reuse any transformed module from the first build.
         working-directory: example
         run: |
           rm -rf storybook-static
@@ -148,25 +157,18 @@ jobs:
           echo "Listing rebuilt storybook-static:"
           ls -la storybook-static | head -20
 
-      - name: Verify rebuild propagated the colour change
-        # This step's NAME is the diagnosis. If it fires, the bundle still
-        # contains the old colour — which means Storybook/Vite aren't picking
-        # up our sed change. If it passes, the bundle has the new colour and
-        # any subsequent lost-pixel "no diff" result is a screenshotting issue
-        # downstream.
+      - name: Verify rebuild propagated the change
+        # Look for the literal "INJECTED" sentinel in the rebuilt bundle.
+        # If it's not there, the rebuild didn't propagate and the failing
+        # step's name says exactly that.
         working-directory: example
         run: |
           set -euxo pipefail
-          if grep -rq '2563eb' storybook-static/; then
-            echo "❌ Old colour 2563eb still present in storybook-static — rebuild did not propagate the change."
-            grep -rh '2563eb' storybook-static/ | head -5 || true
+          if ! grep -rq 'INJECTED' storybook-static/; then
+            echo "❌ Sentinel 'INJECTED' NOT found in storybook-static — rebuild did not propagate the source change."
             exit 1
           fi
-          if ! grep -rq 'dc2626' storybook-static/; then
-            echo "❌ New colour dc2626 NOT present in storybook-static — rebuild did not propagate the change."
-            exit 1
-          fi
-          echo "✅ Rebuild reflects the injected colour change."
+          echo "✅ Rebuild reflects the injected change ('INJECTED' sentinel present)."
 
       - name: Run lost-pixel (Docker, expected to fail)
         id: vr
@@ -188,6 +190,43 @@ jobs:
           ls -la .lost-pixel/difference 2>&1 | head -20 || true
           echo "=== test log tail ==="
           tail -80 lost-pixel-test.log 2>&1 || true
+
+      - name: Manually compare baseline and current PNGs
+        # Sidesteps lost-pixel's diff logic entirely. If baseline and current
+        # PNGs are byte-identical, lost-pixel re-screenshotted but the
+        # rebuild's source change didn't make it into the rendered canvas
+        # — the failing step name says exactly that.
+        working-directory: example
+        run: |
+          set -euxo pipefail
+          if [ ! -d .lost-pixel/current ] || [ -z "$(ls -A .lost-pixel/current 2>/dev/null)" ]; then
+            echo "❌ .lost-pixel/current is empty — lost-pixel did not capture screenshots after the change."
+            exit 1
+          fi
+          DIFFERS=0
+          IDENTICAL=0
+          for current in .lost-pixel/current/*.png; do
+            base="$(basename "$current")"
+            baseline=".lost-pixel/baseline/$base"
+            if [ -f "$baseline" ]; then
+              if cmp -s "$current" "$baseline"; then
+                IDENTICAL=$((IDENTICAL + 1))
+                echo "BYTE-IDENTICAL: $base"
+              else
+                DIFFERS=$((DIFFERS + 1))
+                echo "DIFFERS: $base"
+              fi
+            else
+              DIFFERS=$((DIFFERS + 1))
+              echo "NEW (no baseline): $base"
+            fi
+          done
+          echo "Summary: $DIFFERS differ, $IDENTICAL byte-identical"
+          if [ "$DIFFERS" -eq 0 ]; then
+            echo "❌ ALL current screenshots are byte-identical to baselines after a 'INJECTED' rectangle replaced the entire button. Either lost-pixel is screenshotting from a stale source, or the rendered output is somehow identical."
+            exit 1
+          fi
+          echo "✅ At least one current PNG differs from its baseline — the rebuild and screenshotting are working."
 
       - name: Upload diff artifact
         if: steps.vr.outcome == 'failure'
