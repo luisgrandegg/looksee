@@ -136,14 +136,37 @@ jobs:
           echo "✅ Button.tsx modified:"
           git diff example/src/Button.tsx
 
-      - name: Force-clean Storybook output and rebuild
-        # Remove storybook-static so the rebuild can't use any stale cache.
+      - name: Force-clean Storybook + Vite caches and rebuild
+        # Remove storybook-static AND the Vite/Storybook caches so the rebuild
+        # cannot reuse any transformed module from the first build.
         working-directory: example
         run: |
           rm -rf storybook-static
+          rm -rf node_modules/.cache
+          rm -rf node_modules/.vite
           npm run build-storybook
           echo "Listing rebuilt storybook-static:"
           ls -la storybook-static | head -20
+
+      - name: Verify rebuild propagated the colour change
+        # This step's NAME is the diagnosis. If it fires, the bundle still
+        # contains the old colour — which means Storybook/Vite aren't picking
+        # up our sed change. If it passes, the bundle has the new colour and
+        # any subsequent lost-pixel "no diff" result is a screenshotting issue
+        # downstream.
+        working-directory: example
+        run: |
+          set -euxo pipefail
+          if grep -rq '2563eb' storybook-static/; then
+            echo "❌ Old colour 2563eb still present in storybook-static — rebuild did not propagate the change."
+            grep -rh '2563eb' storybook-static/ | head -5 || true
+            exit 1
+          fi
+          if ! grep -rq 'dc2626' storybook-static/; then
+            echo "❌ New colour dc2626 NOT present in storybook-static — rebuild did not propagate the change."
+            exit 1
+          fi
+          echo "✅ Rebuild reflects the injected colour change."
 
       - name: Run lost-pixel (Docker, expected to fail)
         id: vr
