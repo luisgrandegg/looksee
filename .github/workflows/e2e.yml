@@ -60,10 +60,18 @@ jobs:
 
       - name: Inject deterministic visual change into a story
         # NEVER commit this change. Constitution principle 9: keep determinism real.
+        # The 'Click me' label lives in the story's default args, not in Button.tsx.
         run: |
           set -euxo pipefail
-          sed -i "s/Click me/CLICK!!!/g" example/src/Button.tsx
-          git diff --stat example/src/Button.tsx
+          sed -i "s/Click me/CLICK!!!/g" example/src/Button.stories.tsx
+          git diff --stat example/src/Button.stories.tsx
+          # Sanity-check that we actually mutated something.
+          if ! git diff --quiet example/src/Button.stories.tsx; then
+            echo "✅ Story modified; lost-pixel should now find a diff."
+          else
+            echo "❌ sed did not change anything — the e2e test cannot detect a regression."
+            exit 1
+          fi
 
       - name: Run looksee against modified example/ (expected to fail)
         id: action
