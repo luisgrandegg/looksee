@@ -87,19 +87,28 @@ jobs:
             -w /workdir \
             lostpixel/lost-pixel:latest update
 
-      - name: Inject deterministic visual change into a story
+      - name: Inject deterministic visual change (button background colour)
+        # Change the primary button's background from blue (#2563eb) to red (#dc2626).
+        # This affects every story rendered by Button.tsx with variant=primary,
+        # producing a large-area pixel diff that any reasonable threshold catches.
         run: |
           set -euxo pipefail
-          sed -i "s/Click me/CLICK!!!/g" example/src/Button.stories.tsx
-          if git diff --quiet example/src/Button.stories.tsx; then
+          sed -i "s/#2563eb/#dc2626/g" example/src/Button.tsx
+          if git diff --quiet example/src/Button.tsx; then
             echo "❌ sed did not change anything — the e2e test cannot detect a regression."
             exit 1
           fi
-          echo "✅ Story modified."
+          echo "✅ Button.tsx modified:"
+          git diff example/src/Button.tsx
 
-      - name: Re-build Storybook with the change
+      - name: Force-clean Storybook output and rebuild
+        # Remove storybook-static so the rebuild can't use any stale cache.
         working-directory: example
-        run: npm run build-storybook
+        run: |
+          rm -rf storybook-static
+          npm run build-storybook
+          echo "Listing rebuilt storybook-static:"
+          ls -la storybook-static | head -20
 
       - name: Run lost-pixel (Docker, expected to fail)
         id: vr
