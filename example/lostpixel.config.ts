@@ -12,7 +12,12 @@ export const config: CustomProjectConfig = {
   imagePathCurrent: './.lost-pixel/current',
   imagePathDifference: './.lost-pixel/difference',
   threshold: 0,
+  // For the e2e fixture we fail on any kind of change — pixel difference,
+  // a new screenshot showing up, or a baseline disappearing. Real consumers
+  // typically want only failOnDifference: true; we're testing every angle.
   failOnDifference: true,
+  failOnAddition: true,
+  failOnDeletion: true,
   shotConcurrency: 4,
   breakpoints: [375, 1280],
   timeouts: {

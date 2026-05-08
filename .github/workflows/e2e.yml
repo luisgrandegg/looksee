@@ -191,42 +191,51 @@ jobs:
           echo "=== test log tail ==="
           tail -80 lost-pixel-test.log 2>&1 || true
 
-      - name: Manually compare baseline and current PNGs
-        # Sidesteps lost-pixel's diff logic entirely. If baseline and current
-        # PNGs are byte-identical, lost-pixel re-screenshotted but the
-        # rebuild's source change didn't make it into the rendered canvas
-        # — the failing step name says exactly that.
+      - name: Diagnostic — compare baseline and current PNG sets
+        # Three orthogonal questions about why lost-pixel might not detect
+        # a real change:
+        #   1. Do baseline/ and current/ contain the SAME filenames? If not,
+        #      lost-pixel sees "additions" + "deletions" rather than "diffs".
+        #   2. Among matching pairs, do any actually differ byte-wise?
+        #   3. If everything is byte-identical, the rebuild didn't propagate.
         working-directory: example
         run: |
           set -euxo pipefail
           if [ ! -d .lost-pixel/current ] || [ -z "$(ls -A .lost-pixel/current 2>/dev/null)" ]; then
-            echo "❌ .lost-pixel/current is empty — lost-pixel did not capture screenshots after the change."
+            echo "❌ .lost-pixel/current is empty — lost-pixel did not capture screenshots."
             exit 1
           fi
-          DIFFERS=0
-          IDENTICAL=0
+          BASE_NAMES=$(ls .lost-pixel/baseline/ 2>/dev/null | sort)
+          CURR_NAMES=$(ls .lost-pixel/current/ 2>/dev/null | sort)
+          echo "=== baseline filenames ==="
+          echo "$BASE_NAMES"
+          echo "=== current filenames ==="
+          echo "$CURR_NAMES"
+          ONLY_BASE=$(comm -23 <(echo "$BASE_NAMES") <(echo "$CURR_NAMES") || true)
+          ONLY_CURR=$(comm -13 <(echo "$BASE_NAMES") <(echo "$CURR_NAMES") || true)
+          if [ -n "$ONLY_BASE" ] || [ -n "$ONLY_CURR" ]; then
+            echo "⚠️  Filename sets differ between baseline/ and current/."
+            [ -n "$ONLY_BASE" ] && echo "Only in baseline/:" && echo "$ONLY_BASE"
+            [ -n "$ONLY_CURR" ] && echo "Only in current/:"  && echo "$ONLY_CURR"
+          fi
+          DIFFERS=0; IDENTICAL=0
           for current in .lost-pixel/current/*.png; do
             base="$(basename "$current")"
             baseline=".lost-pixel/baseline/$base"
             if [ -f "$baseline" ]; then
               if cmp -s "$current" "$baseline"; then
                 IDENTICAL=$((IDENTICAL + 1))
-                echo "BYTE-IDENTICAL: $base"
               else
                 DIFFERS=$((DIFFERS + 1))
-                echo "DIFFERS: $base"
               fi
-            else
-              DIFFERS=$((DIFFERS + 1))
-              echo "NEW (no baseline): $base"
             fi
           done
-          echo "Summary: $DIFFERS differ, $IDENTICAL byte-identical"
-          if [ "$DIFFERS" -eq 0 ]; then
-            echo "❌ ALL current screenshots are byte-identical to baselines after a 'INJECTED' rectangle replaced the entire button. Either lost-pixel is screenshotting from a stale source, or the rendered output is somehow identical."
+          echo "Summary: matched-pair differs=$DIFFERS, byte-identical=$IDENTICAL"
+          if [ "$DIFFERS" -eq 0 ] && [ -z "$ONLY_CURR" ] && [ -z "$ONLY_BASE" ]; then
+            echo "❌ Same filenames, all byte-identical — rebuild didn't reach the rendered output."
             exit 1
           fi
-          echo "✅ At least one current PNG differs from its baseline — the rebuild and screenshotting are working."
+          echo "✅ Baseline and current sets show meaningful differences."
 
       - name: Upload diff artifact
         if: steps.vr.outcome == 'failure'
