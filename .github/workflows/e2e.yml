@@ -5,11 +5,14 @@ on:
   push:
     branches: [main]
 
-# These jobs run lost-pixel against example/ end-to-end. They run the Action's
-# constituent steps directly (install + Playwright + storybook build + lost-pixel)
-# rather than nesting the composite Action under another setup-node. Bootstrapping
-# baselines on the same Linux runner where the test runs keeps screenshots
-# byte-deterministic for the duration of the job.
+# Both jobs run lost-pixel through the official Docker image for both baseline
+# generation AND the test run. This avoids host-Chromium non-determinism (the
+# same issue documented in docs/troubleshooting.md's opening warning) — the
+# Docker image pins Chromium and system fonts, so consecutive runs against the
+# same Storybook output are byte-identical.
+#
+# The npm-side install / Storybook build is still on the host; only the
+# screenshotting step uses Docker.
 jobs:
   green:
     name: Green — no visual change, expects pass
@@ -25,21 +28,30 @@ jobs:
         working-directory: example
         run: npm install --no-audit --no-fund
 
-      - name: Install Playwright Chromium
-        working-directory: example
-        run: npx playwright install --with-deps chromium
-
       - name: Build Storybook
         working-directory: example
         run: npm run build-storybook
 
-      - name: Generate baselines
-        working-directory: example
-        run: npx lost-pixel update
+      - name: Pull lost-pixel image
+        run: docker pull lostpixel/lost-pixel:latest
 
-      - name: Run lost-pixel against just-generated baselines (expects pass)
+      - name: Generate baselines (Docker)
         working-directory: example
-        run: npx lost-pixel
+        run: |
+          docker run --rm \
+            --platform linux/amd64 \
+            -v "$(pwd):/workdir" \
+            -w /workdir \
+            lostpixel/lost-pixel:latest update
+
+      - name: Run lost-pixel against baselines (Docker, expects pass)
+        working-directory: example
+        run: |
+          docker run --rm \
+            --platform linux/amd64 \
+            -v "$(pwd):/workdir" \
+            -w /workdir \
+            lostpixel/lost-pixel:latest
 
       - name: List baselines on success
         working-directory: example
@@ -59,21 +71,23 @@ jobs:
         working-directory: example
         run: npm install --no-audit --no-fund
 
-      - name: Install Playwright Chromium
-        working-directory: example
-        run: npx playwright install --with-deps chromium
-
       - name: Build Storybook (unmodified)
         working-directory: example
         run: npm run build-storybook
 
-      - name: Generate baselines from unmodified example/
+      - name: Pull lost-pixel image
+        run: docker pull lostpixel/lost-pixel:latest
+
+      - name: Generate baselines from unmodified example/ (Docker)
         working-directory: example
-        run: npx lost-pixel update
+        run: |
+          docker run --rm \
+            --platform linux/amd64 \
+            -v "$(pwd):/workdir" \
+            -w /workdir \
+            lostpixel/lost-pixel:latest update
 
       - name: Inject deterministic visual change into a story
-        # NEVER commit this change. The 'Click me' label lives in the story's
-        # default args, not in Button.tsx — so we sed the .stories.tsx file.
         run: |
           set -euxo pipefail
           sed -i "s/Click me/CLICK!!!/g" example/src/Button.stories.tsx
@@ -87,11 +101,16 @@ jobs:
         working-directory: example
         run: npm run build-storybook
 
-      - name: Run lost-pixel (expected to fail)
+      - name: Run lost-pixel (Docker, expected to fail)
         id: vr
         working-directory: example
         continue-on-error: true
-        run: npx lost-pixel
+        run: |
+          docker run --rm \
+            --platform linux/amd64 \
+            -v "$(pwd):/workdir" \
+            -w /workdir \
+            lostpixel/lost-pixel:latest
 
       - name: Upload diff artifact
         if: steps.vr.outcome == 'failure'
