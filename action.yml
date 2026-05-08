@@ -50,9 +50,15 @@ runs:
         elif [ -f yarn.lock ]; then
           echo "manager=yarn" >> "$GITHUB_OUTPUT"
           echo "install=yarn install --frozen-lockfile" >> "$GITHUB_OUTPUT"
-        else
+        elif [ -f package-lock.json ]; then
           echo "manager=npm" >> "$GITHUB_OUTPUT"
           echo "install=npm ci" >> "$GITHUB_OUTPUT"
+        else
+          # No lockfile present. `npm ci` would fail; fall back to `npm install`.
+          # Reproducibility is reduced — but a consumer without a committed
+          # lockfile is rarer than a consumer who hits a hard failure here.
+          echo "manager=npm" >> "$GITHUB_OUTPUT"
+          echo "install=npm install --no-audit --no-fund" >> "$GITHUB_OUTPUT"
         fi
         echo "Using: $(grep '^install=' \"$GITHUB_OUTPUT\")"
 

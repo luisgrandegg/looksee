@@ -5,6 +5,10 @@ on:
   push:
     branches: [main]
 
+# Each job bootstraps baselines once on the runner before invoking the Action.
+# We don't commit baselines to the repo because they would not match the runner's
+# rendering byte-for-byte. Bootstrapping in the same Linux environment that the
+# Action runs in keeps them deterministic for the duration of the job.
 jobs:
   green:
     name: Green — no visual change, expects pass
@@ -12,10 +16,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Use the action from the current commit. Re-running locally would use
-      # the published @v0/@v1 ref; in CI we point at the workspace itself
-      # so PRs test against their own changes.
-      - name: Run looksee against example/
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Bootstrap baselines for example/
+        working-directory: example
+        run: |
+          set -euxo pipefail
+          npm install --no-audit --no-fund
+          npx playwright install --with-deps chromium
+          npm run build-storybook
+          npx lost-pixel update
+          ls .lost-pixel/baseline | head
+
+      - name: Run looksee against unmodified example/
         uses: ./
         with:
           working-directory: example
@@ -24,14 +39,27 @@ jobs:
   red:
     name: Red — inject visual change at runtime, expects fail
     runs-on: ubuntu-latest
-    # The whole job is expected to fail. We invert the result with continue-on-error
-    # plus an explicit assertion step.
     steps:
       - uses: actions/checkout@v4
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Bootstrap baselines from the unmodified example/
+        # Bootstrap BEFORE injecting the change, so baselines reflect the
+        # original Button text. After injection, the action's lost-pixel run
+        # will see a real diff and fail — that's what this job verifies.
+        working-directory: example
+        run: |
+          set -euxo pipefail
+          npm install --no-audit --no-fund
+          npx playwright install --with-deps chromium
+          npm run build-storybook
+          npx lost-pixel update
+
       - name: Inject deterministic visual change into a story
         # NEVER commit this change. Constitution principle 9: keep determinism real.
-        # The example's Button story renders text 'Click me' — change it to 'CLICK!!!'.
         run: |
           set -euxo pipefail
           sed -i "s/Click me/CLICK!!!/g" example/src/Button.tsx
