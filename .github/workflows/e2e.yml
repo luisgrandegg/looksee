@@ -32,6 +32,18 @@ jobs:
         working-directory: example
         run: npm run build-storybook
 
+      - name: Verify Storybook produced an index.json with stories
+        working-directory: example
+        run: |
+          set -euxo pipefail
+          test -f storybook-static/index.json
+          ENTRIES=$(node -e "console.log(Object.keys(require('./storybook-static/index.json').entries||{}).length)")
+          echo "index.json reports $ENTRIES entries"
+          if [ "$ENTRIES" = "0" ]; then
+            echo "❌ Storybook built 0 entries — lost-pixel will see no stories."
+            exit 1
+          fi
+
       - name: Pull lost-pixel image
         run: docker pull lostpixel/lost-pixel:latest
 
@@ -42,7 +54,21 @@ jobs:
             --platform linux/amd64 \
             -v "$(pwd):/workdir" \
             -w /workdir \
-            lostpixel/lost-pixel:latest update
+            lostpixel/lost-pixel:latest update 2>&1 | tee lost-pixel-update.log
+
+      - name: Assert at least one baseline was produced
+        working-directory: example
+        run: |
+          set -euxo pipefail
+          COUNT=$(ls -1 .lost-pixel/baseline/*.png 2>/dev/null | wc -l || true)
+          echo "Baselines: $COUNT PNG file(s)"
+          ls -la .lost-pixel/baseline | head -20
+          if [ "$COUNT" -lt 1 ]; then
+            echo "❌ lost-pixel update produced no baselines — there is a story-discovery issue."
+            echo "--- update log tail ---"
+            tail -50 lost-pixel-update.log || true
+            exit 1
+          fi
 
       - name: Run lost-pixel against baselines (Docker, expects pass)
         working-directory: example
@@ -52,10 +78,6 @@ jobs:
             -v "$(pwd):/workdir" \
             -w /workdir \
             lostpixel/lost-pixel:latest
-
-      - name: List baselines on success
-        working-directory: example
-        run: ls -la .lost-pixel/baseline | head -20
 
   red:
     name: Red — inject visual change after baselines, expects fail
@@ -85,7 +107,20 @@ jobs:
             --platform linux/amd64 \
             -v "$(pwd):/workdir" \
             -w /workdir \
-            lostpixel/lost-pixel:latest update
+            lostpixel/lost-pixel:latest update 2>&1 | tee lost-pixel-update.log
+
+      - name: Assert at least one baseline was produced
+        working-directory: example
+        run: |
+          set -euxo pipefail
+          COUNT=$(ls -1 .lost-pixel/baseline/*.png 2>/dev/null | wc -l || true)
+          echo "Baselines: $COUNT PNG file(s)"
+          ls -la .lost-pixel/baseline | head -20
+          if [ "$COUNT" -lt 1 ]; then
+            echo "❌ lost-pixel update produced no baselines — there is a story-discovery issue."
+            tail -50 lost-pixel-update.log || true
+            exit 1
+          fi
 
       - name: Inject deterministic visual change (button background colour)
         # Change the primary button's background from blue (#2563eb) to red (#dc2626).
@@ -119,7 +154,17 @@ jobs:
             --platform linux/amd64 \
             -v "$(pwd):/workdir" \
             -w /workdir \
-            lostpixel/lost-pixel:latest
+            lostpixel/lost-pixel:latest 2>&1 | tee lost-pixel-test.log
+
+      - name: Print lost-pixel state after test run
+        working-directory: example
+        run: |
+          echo "=== current/ ==="
+          ls -la .lost-pixel/current 2>&1 | head -20 || true
+          echo "=== difference/ ==="
+          ls -la .lost-pixel/difference 2>&1 | head -20 || true
+          echo "=== test log tail ==="
+          tail -80 lost-pixel-test.log 2>&1 || true
 
       - name: Upload diff artifact
         if: steps.vr.outcome == 'failure'
