@@ -1,14 +1,15 @@
-name: E2E (Action against example/)
+name: E2E (lost-pixel against example/)
 
 on:
   pull_request:
   push:
     branches: [main]
 
-# Each job bootstraps baselines once on the runner before invoking the Action.
-# We don't commit baselines to the repo because they would not match the runner's
-# rendering byte-for-byte. Bootstrapping in the same Linux environment that the
-# Action runs in keeps them deterministic for the duration of the job.
+# These jobs run lost-pixel against example/ end-to-end. They run the Action's
+# constituent steps directly (install + Playwright + storybook build + lost-pixel)
+# rather than nesting the composite Action under another setup-node. Bootstrapping
+# baselines on the same Linux runner where the test runs keeps screenshots
+# byte-deterministic for the duration of the job.
 jobs:
   green:
     name: Green — no visual change, expects pass
@@ -20,24 +21,32 @@ jobs:
         with:
           node-version: '20'
 
-      - name: Bootstrap baselines for example/
+      - name: Install dependencies
         working-directory: example
-        run: |
-          set -euxo pipefail
-          npm install --no-audit --no-fund
-          npx playwright install --with-deps chromium
-          npm run build-storybook
-          npx lost-pixel update
-          ls .lost-pixel/baseline | head
+        run: npm install --no-audit --no-fund
 
-      - name: Run looksee against unmodified example/
-        uses: ./
-        with:
-          working-directory: example
-          comment-on-pr: 'false' # don't spam PRs from the e2e job
+      - name: Install Playwright Chromium
+        working-directory: example
+        run: npx playwright install --with-deps chromium
+
+      - name: Build Storybook
+        working-directory: example
+        run: npm run build-storybook
+
+      - name: Generate baselines
+        working-directory: example
+        run: npx lost-pixel update
+
+      - name: Run lost-pixel against just-generated baselines (expects pass)
+        working-directory: example
+        run: npx lost-pixel
+
+      - name: List baselines on success
+        working-directory: example
+        run: ls -la .lost-pixel/baseline | head -20
 
   red:
-    name: Red — inject visual change at runtime, expects fail
+    name: Red — inject visual change after baselines, expects fail
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -46,46 +55,60 @@ jobs:
         with:
           node-version: '20'
 
-      - name: Bootstrap baselines from the unmodified example/
-        # Bootstrap BEFORE injecting the change, so baselines reflect the
-        # original Button text. After injection, the action's lost-pixel run
-        # will see a real diff and fail — that's what this job verifies.
+      - name: Install dependencies
         working-directory: example
-        run: |
-          set -euxo pipefail
-          npm install --no-audit --no-fund
-          npx playwright install --with-deps chromium
-          npm run build-storybook
-          npx lost-pixel update
+        run: npm install --no-audit --no-fund
+
+      - name: Install Playwright Chromium
+        working-directory: example
+        run: npx playwright install --with-deps chromium
+
+      - name: Build Storybook (unmodified)
+        working-directory: example
+        run: npm run build-storybook
+
+      - name: Generate baselines from unmodified example/
+        working-directory: example
+        run: npx lost-pixel update
 
       - name: Inject deterministic visual change into a story
-        # NEVER commit this change. Constitution principle 9: keep determinism real.
-        # The 'Click me' label lives in the story's default args, not in Button.tsx.
+        # NEVER commit this change. The 'Click me' label lives in the story's
+        # default args, not in Button.tsx — so we sed the .stories.tsx file.
         run: |
           set -euxo pipefail
           sed -i "s/Click me/CLICK!!!/g" example/src/Button.stories.tsx
-          git diff --stat example/src/Button.stories.tsx
-          # Sanity-check that we actually mutated something.
-          if ! git diff --quiet example/src/Button.stories.tsx; then
-            echo "✅ Story modified; lost-pixel should now find a diff."
-          else
+          if git diff --quiet example/src/Button.stories.tsx; then
             echo "❌ sed did not change anything — the e2e test cannot detect a regression."
             exit 1
           fi
+          echo "✅ Story modified."
 
-      - name: Run looksee against modified example/ (expected to fail)
-        id: action
+      - name: Re-build Storybook with the change
+        working-directory: example
+        run: npm run build-storybook
+
+      - name: Run lost-pixel (expected to fail)
+        id: vr
+        working-directory: example
         continue-on-error: true
-        uses: ./
-        with:
-          working-directory: example
-          comment-on-pr: 'false'
+        run: npx lost-pixel
 
-      - name: Assert action failed as expected
+      - name: Upload diff artifact
+        if: steps.vr.outcome == 'failure'
+        uses: actions/upload-artifact@v4
+        with:
+          name: lost-pixel-diff-red-${{ github.run_id }}
+          path: |
+            example/.lost-pixel/difference/
+            example/.lost-pixel/current/
+          retention-days: 7
+          if-no-files-found: ignore
+
+      - name: Assert lost-pixel detected the regression
         run: |
-          if [ "${{ steps.action.outcome }}" = "failure" ]; then
+          if [ "${{ steps.vr.outcome }}" = "failure" ]; then
             echo "✅ Expected: lost-pixel detected the injected regression."
             exit 0
           fi
-          echo "❌ Expected the action to fail on the injected change, but it did not."
+          echo "❌ Expected lost-pixel to fail on the injected change, but it passed."
           exit 1
