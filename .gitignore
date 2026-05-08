@@ -1,0 +1,44 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Build outputs
+dist/
+*.tsbuildinfo
+
+# Test outputs
+coverage/
+.vitest/
+
+# Storybook (in example/)
+example/storybook-static/
+
+# Lost Pixel runtime artifacts (in example/)
+example/.lost-pixel/current/
+example/.lost-pixel/difference/
+
+# Local env
+.env
+.env.local
+.env.*.local
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Editor caches
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+
+# Claude Code local settings (personal overrides — not shared)
+.claude/settings.local.json
+
+# Backlog scratch
+backlog/.scratch/

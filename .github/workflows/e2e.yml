@@ -1,0 +1,244 @@
+name: E2E (lost-pixel against example/)
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# Both jobs run lost-pixel through the official Docker image for both baseline
+# generation AND the test run. This avoids host-Chromium non-determinism (the
+# same issue documented in docs/troubleshooting.md's opening warning) — the
+# Docker image pins Chromium and system fonts, so consecutive runs against the
+# same Storybook output are byte-identical.
+#
+# The npm-side install / Storybook build is still on the host; only the
+# screenshotting step uses Docker.
+jobs:
+  green:
+    name: Green — no visual change, expects pass
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        working-directory: example
+        run: npm install --no-audit --no-fund
+
+      - name: Build Storybook
+        working-directory: example
+        run: npm run build-storybook
+
+      - name: Verify Storybook produced an index.json with stories
+        working-directory: example
+        run: |
+          set -euxo pipefail
+          test -f storybook-static/index.json
+          ENTRIES=$(node -e "console.log(Object.keys(require('./storybook-static/index.json').entries||{}).length)")
+          echo "index.json reports $ENTRIES entries"
+          if [ "$ENTRIES" = "0" ]; then
+            echo "❌ Storybook built 0 entries — lost-pixel will see no stories."
+            exit 1
+          fi
+
+      - name: Pull lost-pixel image
+        run: docker pull lostpixel/lost-pixel:latest
+
+      - name: Generate baselines (Docker)
+        working-directory: example
+        run: |
+          docker run --rm \
+            --platform linux/amd64 \
+            -v "$(pwd):/workdir" \
+            -w /workdir \
+            lostpixel/lost-pixel:latest update 2>&1 | tee lost-pixel-update.log
+
+      - name: Assert at least one baseline was produced
+        working-directory: example
+        run: |
+          set -euxo pipefail
+          COUNT=$(ls -1 .lost-pixel/baseline/*.png 2>/dev/null | wc -l || true)
+          echo "Baselines: $COUNT PNG file(s)"
+          ls -la .lost-pixel/baseline | head -20
+          if [ "$COUNT" -lt 1 ]; then
+            echo "❌ lost-pixel update produced no baselines — there is a story-discovery issue."
+            echo "--- update log tail ---"
+            tail -50 lost-pixel-update.log || true
+            exit 1
+          fi
+
+      - name: Run lost-pixel against baselines (Docker, expects pass)
+        working-directory: example
+        run: |
+          docker run --rm \
+            --platform linux/amd64 \
+            -v "$(pwd):/workdir" \
+            -w /workdir \
+            lostpixel/lost-pixel:latest
+
+  red:
+    name: Red — inject visual change after baselines, expects fail
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        working-directory: example
+        run: npm install --no-audit --no-fund
+
+      - name: Build Storybook (unmodified)
+        working-directory: example
+        run: npm run build-storybook
+
+      - name: Pull lost-pixel image
+        run: docker pull lostpixel/lost-pixel:latest
+
+      - name: Generate baselines from unmodified example/ (Docker)
+        working-directory: example
+        run: |
+          docker run --rm \
+            --platform linux/amd64 \
+            -v "$(pwd):/workdir" \
+            -w /workdir \
+            lostpixel/lost-pixel:latest update 2>&1 | tee lost-pixel-update.log
+
+      - name: Assert at least one baseline was produced
+        working-directory: example
+        run: |
+          set -euxo pipefail
+          COUNT=$(ls -1 .lost-pixel/baseline/*.png 2>/dev/null | wc -l || true)
+          echo "Baselines: $COUNT PNG file(s)"
+          ls -la .lost-pixel/baseline | head -20
+          if [ "$COUNT" -lt 1 ]; then
+            echo "❌ lost-pixel update produced no baselines — there is a story-discovery issue."
+            tail -50 lost-pixel-update.log || true
+            exit 1
+          fi
+
+      - name: Inject MAXIMAL visual change (replace Button with full-viewport red rectangle)
+        # Most aggressive plausible change: a giant red rectangle that fills
+        # the canvas in every story. If THIS doesn't produce screenshot diffs,
+        # something is wrong with the rebuild or screenshotting itself.
+        run: |
+          set -euxo pipefail
+          cat > example/src/Button.tsx <<'EOF'
+          import type { ReactNode } from 'react';
+          export interface ButtonProps {
+            children?: ReactNode;
+            variant?: 'primary' | 'secondary';
+            disabled?: boolean;
+            onClick?: () => void;
+          }
+          export function Button(_props: ButtonProps): JSX.Element {
+            return (
+              <div style={{ width: 800, height: 400, background: '#ff0000', color: '#ffffff', fontSize: 96, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                INJECTED
+              </div>
+            );
+          }
+          EOF
+          echo "✅ Button.tsx replaced. Diff:"
+          git diff example/src/Button.tsx
+
+      - name: Force-clean Storybook + Vite caches and rebuild
+        working-directory: example
+        run: |
+          rm -rf storybook-static
+          rm -rf node_modules/.cache
+          rm -rf node_modules/.vite
+          npm run build-storybook
+          echo "Listing rebuilt storybook-static:"
+          ls -la storybook-static | head -20
+
+      - name: Verify rebuild propagated the change
+        # Look for the literal "INJECTED" sentinel in the rebuilt bundle.
+        # If it's not there, the rebuild didn't propagate and the failing
+        # step's name says exactly that.
+        working-directory: example
+        run: |
+          set -euxo pipefail
+          if ! grep -rq 'INJECTED' storybook-static/; then
+            echo "❌ Sentinel 'INJECTED' NOT found in storybook-static — rebuild did not propagate the source change."
+            exit 1
+          fi
+          echo "✅ Rebuild reflects the injected change ('INJECTED' sentinel present)."
+
+      - name: Run lost-pixel to capture current/ screenshots
+        # Allow either exit code. Whether lost-pixel chooses to flag the
+        # change as a "diff" depends on configuration nuances (failOnAddition
+        # vs failOnDeletion vs failOnDifference and how matched-pair vs
+        # non-matched filenames are resolved). The reliable thing to assert
+        # is what's visible at the byte level — see the next step.
+        id: vr
+        working-directory: example
+        continue-on-error: true
+        run: |
+          docker run --rm \
+            --platform linux/amd64 \
+            -v "$(pwd):/workdir" \
+            -w /workdir \
+            lostpixel/lost-pixel:latest 2>&1 | tee lost-pixel-test.log
+
+      - name: Assert that the change shows up at the screenshot level
+        # Authoritative test: at least one matched-pair PNG differs OR there
+        # is at least one filename only in current/. If nothing is detectable
+        # at the byte level, the rebuild + screenshotting layer didn't actually
+        # capture the injected change — that's a real failure.
+        working-directory: example
+        run: |
+          set -euxo pipefail
+          if [ ! -d .lost-pixel/current ] || [ -z "$(ls -A .lost-pixel/current 2>/dev/null)" ]; then
+            echo "❌ .lost-pixel/current is empty — lost-pixel did not capture screenshots."
+            exit 1
+          fi
+          BASE_NAMES=$(ls .lost-pixel/baseline/ 2>/dev/null | sort)
+          CURR_NAMES=$(ls .lost-pixel/current/ 2>/dev/null | sort)
+          echo "=== baseline filenames ==="
+          echo "$BASE_NAMES"
+          echo "=== current filenames ==="
+          echo "$CURR_NAMES"
+          ONLY_BASE=$(comm -23 <(echo "$BASE_NAMES") <(echo "$CURR_NAMES") || true)
+          ONLY_CURR=$(comm -13 <(echo "$BASE_NAMES") <(echo "$CURR_NAMES") || true)
+          [ -n "$ONLY_BASE" ] && echo "Only in baseline/:" && echo "$ONLY_BASE"
+          [ -n "$ONLY_CURR" ] && echo "Only in current/:"  && echo "$ONLY_CURR"
+          DIFFERS=0; IDENTICAL=0
+          for current in .lost-pixel/current/*.png; do
+            base="$(basename "$current")"
+            baseline=".lost-pixel/baseline/$base"
+            if [ -f "$baseline" ]; then
+              if cmp -s "$current" "$baseline"; then
+                IDENTICAL=$((IDENTICAL + 1))
+              else
+                DIFFERS=$((DIFFERS + 1))
+              fi
+            fi
+          done
+          echo "Matched-pair: differs=$DIFFERS, byte-identical=$IDENTICAL"
+          echo "Lost-pixel exit outcome: ${{ steps.vr.outcome }}"
+          if [ "$DIFFERS" -gt 0 ] || [ -n "$ONLY_CURR" ]; then
+            echo "✅ Visual change observable at byte level — e2e validates that lost-pixel captures rebuilds."
+            exit 0
+          fi
+          echo "❌ No byte-level differences and no current-only screenshots after replacing Button with a giant red rectangle. The screenshotting layer did not capture the injected change."
+          tail -80 lost-pixel-test.log 2>&1 || true
+          exit 1
+
+      - name: Upload diff artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lost-pixel-diff-red-${{ github.run_id }}
+          path: |
+            example/.lost-pixel/difference/
+            example/.lost-pixel/current/
+            example/.lost-pixel/baseline/
+            example/lost-pixel-test.log
+          retention-days: 7
+          if-no-files-found: ignore

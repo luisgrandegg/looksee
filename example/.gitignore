@@ -1,0 +1,5 @@
+node_modules/
+storybook-static/
+# looksee — visual regression runtime artifacts
+.lost-pixel/current/
+.lost-pixel/difference/
